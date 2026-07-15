@@ -22,6 +22,17 @@ Please make sure the version compatibility with the Asynq package you are using.
 | 0.18.x         | 0.2.x, 0.3.x             |
 | 0.16.x, 0.17.x | 0.1.x                    |
 
+_Note_: this fork pins **asynq v0.25.1** (Redis schema is wire-compatible with 0.24.x).
+
+## Additions in this fork
+
+On top of upstream asynqmon:
+
+- **Queues overview**: sortable per-state count columns (each count deep-links to that queue's state tab), a per-user column selector (persisted in the browser), Actions pinned sticky-right, thousands separators.
+- **Newest-first archived & completed tables**, via an `order=desc` parameter on their list endpoints.
+- **Cross-page task search** on every status tab: "Search all N" scans the whole state server-side in progressive windows (`--search-scan-window` per request, "Search deeper" continues) and reports honestly how much was scanned. Matches task ID, type, and formatted payload; a full task UUID short-circuits to an O(1) exact lookup and hints when the task lives under a different state.
+- Task ID/payload filter toolbar, light theme, `--root-path` support, multi-arch Dockerfile (earlier fork commits).
+
 ## Install the binary
 
 There're a few options to install the binary:
@@ -112,6 +123,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
 | `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode                                                                                                 | false            |
 | `--root-path`(string)             | `ROOT_PATH`               | root path prefix for web ui url                                                                                              | ""               |
+| `--search-scan-window`(int)       | `SEARCH_SCAN_WINDOW`      | maximum number of tasks scanned per task-search request (capped at 10000; lower it for busier Redis instances)              | 10000            |
 
 ### Connecting to Redis
 
