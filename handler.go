@@ -42,6 +42,12 @@ type Options struct {
 
 	// Set ReadOnly to true to restrict user to view-only mode.
 	ReadOnly bool
+
+	// SearchScanWindow is the maximum number of tasks the task search endpoint
+	// examines per request.
+	//
+	// This field is optional. Default is 10000 (also the cap); lower it for busier Redis instances.
+	SearchScanWindow int
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -183,6 +189,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/queues/{qname}/groups/{gname}/aggregating_tasks/{task_id}:archive", newArchiveTaskHandlerFunc(inspector)).Methods("POST")
 	api.HandleFunc("/queues/{qname}/groups/{gname}/aggregating_tasks:archive_all", newArchiveAllAggregatingTasksHandlerFunc(inspector)).Methods("POST")
 	api.HandleFunc("/queues/{qname}/groups/{gname}/aggregating_tasks:batch_archive", newBatchArchiveTasksHandlerFunc(inspector)).Methods("POST")
+
+	// Task search endpoint (registered before the {task_id} route so that
+	// "search" is not captured as a task id).
+	api.HandleFunc("/queues/{qname}/tasks/search", newSearchTasksHandlerFunc(inspector, payloadFmt, resultFmt, opts.SearchScanWindow)).Methods("GET")
 
 	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, payloadFmt, resultFmt)).Methods("GET")
 

@@ -364,6 +364,28 @@ export interface PaginationOptions extends Record<string, number | undefined> {
   page?: number; // page number (1 being the first page)
 }
 
+export interface SearchTasksResponse {
+  matches: TaskInfo[];
+  scanned: number; // tasks examined by this request
+  total: number; // state size at request time
+  next_offset: number | null; // null when the whole state has been scanned
+  hint?: string; // exact-ID lookup outcome, when the query was a full task ID
+}
+
+export async function searchTasks(
+  qname: string,
+  state: string,
+  query: string,
+  offset: number
+): Promise<SearchTasksResponse> {
+  const params = queryString.stringify({ state, q: query, offset });
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/queues/${qname}/tasks/search?${params}`,
+  });
+  return resp.data;
+}
+
 export async function listQueues(): Promise<ListQueuesResponse> {
   const resp = await axios({
     method: "get",
@@ -516,10 +538,9 @@ export async function listArchivedTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
+  // Always newest-first: the server reverses its ascending (oldest-first) storage order.
   let url = `${getBaseUrl()}/queues/${qname}/archived_tasks`;
-  if (pageOpts) {
-    url += `?${queryString.stringify(pageOpts)}`;
-  }
+  url += `?${queryString.stringify({ ...pageOpts, order: "desc" })}`;
   const resp = await axios({
     method: "get",
     url,
@@ -531,10 +552,9 @@ export async function listCompletedTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
+  // Always newest-first: the server reverses its ascending (oldest-first) storage order.
   let url = `${getBaseUrl()}/queues/${qname}/completed_tasks`;
-  if (pageOpts) {
-    url += `?${queryString.stringify(pageOpts)}`;
-  }
+  url += `?${queryString.stringify({ ...pageOpts, order: "desc" })}`;
   const resp = await axios({
     method: "get",
     url,

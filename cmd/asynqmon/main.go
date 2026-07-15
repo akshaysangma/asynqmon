@@ -43,6 +43,9 @@ type Config struct {
 	MaxPayloadLength int
 	MaxResultLength  int
 
+	// Maximum number of tasks scanned per task-search request.
+	SearchScanWindow int
+
 	// Prometheus related configs
 	EnableMetricsExporter bool
 	PrometheusServerAddr  string
@@ -76,6 +79,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.BoolVar(&conf.EnableMetricsExporter, "enable-metrics-exporter", getEnvOrDefaultBool("ENABLE_METRICS_EXPORTER", false), "enable prometheus metrics exporter to expose queue metrics")
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
+	flags.IntVar(&conf.SearchScanWindow, "search-scan-window", getEnvOrDefaultInt("SEARCH_SCAN_WINDOW", 10000), "maximum number of tasks scanned per task-search request")
 	flags.StringVar(&conf.RootPath, "root-path", getEnvDefaultString("ROOT_PATH", "/"), "root path prefix for web ui url")
 
 	err = flags.Parse(args)
@@ -159,6 +163,7 @@ func main() {
 		PrometheusAddress: cfg.PrometheusServerAddr,
 		ReadOnly:          cfg.ReadOnly,
 		RootPath:          cfg.RootPath,
+		SearchScanWindow:  cfg.SearchScanWindow,
 	})
 	defer h.Close()
 

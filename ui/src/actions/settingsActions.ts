@@ -6,6 +6,7 @@ export const THEME_PREFERENCE_CHANGE = "THEME_PREFERENCE_CHANGE";
 export const TOGGLE_DRAWER = "TOGGLE_DRAWER";
 export const TASK_ROWS_PER_PAGE_CHANGE = "TASK_ROWS_PER_PAGE_CHANGE";
 export const DAILY_STATS_KEY_CHANGE = "DAILY_STATS_KEY_CHANGE";
+export const DASHBOARD_HIDDEN_COLUMNS_CHANGE = "DASHBOARD_HIDDEN_COLUMNS_CHANGE";
 
 interface PollIntervalChangeAction {
   type: typeof POLL_INTERVAL_CHANGE;
@@ -31,13 +32,19 @@ interface DailyStatsKeyChange {
   value: DailyStatsKey;
 }
 
+interface DashboardHiddenColumnsChange {
+  type: typeof DASHBOARD_HIDDEN_COLUMNS_CHANGE;
+  value: string[]; // keys of hidden queues-overview columns
+}
+
 // Union of all settings related action types.
 export type SettingsActionTypes =
   | PollIntervalChangeAction
   | ThemePreferenceChangeAction
   | ToggleDrawerAction
   | TaskRowsPerPageChange
-  | DailyStatsKeyChange;
+  | DailyStatsKeyChange
+  | DashboardHiddenColumnsChange;
 
 export function pollIntervalChange(value: number) {
   return {
@@ -69,4 +76,11 @@ export function dailyStatsKeyChange(value: DailyStatsKey) {
     type: DAILY_STATS_KEY_CHANGE,
     value,
   }
+}
+
+export function dashboardHiddenColumnsChange(value: string[]) {
+  return {
+    type: DASHBOARD_HIDDEN_COLUMNS_CHANGE,
+    value,
+  };
 }

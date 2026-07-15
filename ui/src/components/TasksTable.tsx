@@ -8,6 +8,7 @@ import TableHead from "@material-ui/core/TableHead";
 import TableRow from "@material-ui/core/TableRow";
 import TableFooter from "@material-ui/core/TableFooter";
 import Paper from "@material-ui/core/Paper";
+import Button from "@material-ui/core/Button";
 import Checkbox from "@material-ui/core/Checkbox";
 import IconButton from "@material-ui/core/IconButton";
 import TextField from "@material-ui/core/TextField";
@@ -24,7 +25,7 @@ import TaskIdFilterToolbar from "./TaskIdFilterToolbar";
 import { usePolling } from "../hooks";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
-import { PaginationOptions } from "../api";
+import { PaginationOptions, searchTasks } from "../api";
 import { TaskState } from "../types/taskState";
 
 const useStyles = makeStyles((theme) => ({
@@ -87,6 +88,16 @@ interface Props {
   renderRow: (rowProps: RowProps) => JSX.Element;
 }
 
+// Snapshot of an in-progress cross-page search; null when the live table is shown.
+interface SearchResults {
+  query: string;
+  matches: TaskInfoExtended[];
+  scanned: number; // cumulative tasks examined across [Search deeper] hops
+  total: number;
+  nextOffset: number | null;
+  hint?: string;
+}
+
 export default function TasksTable(props: Props) {
   const { pollInterval, listTasks, queue, pageSize } = props;
   const classes = useStyles();
@@ -94,6 +105,11 @@ export default function TasksTable(props: Props) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string>("");
   const [filterText, setFilterText] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResults | null>(
+    null
+  );
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
 
   const filteredTasks = useMemo(() => {
     const q = filterText.toLowerCase().trim();
@@ -104,6 +120,47 @@ export default function TasksTable(props: Props) {
         (t.payload && t.payload.toLowerCase().includes(q))
     );
   }, [props.tasks, filterText]);
+
+  // Search only wires into the plain per-state tables; the aggregating table
+  // has its own group-scoped container.
+  const searchSupported = props.taskState !== "aggregating";
+  const inSearchMode = searchResults !== null;
+
+  const runSearch = (offset: number, existing: SearchResults | null) => {
+    const query = existing ? existing.query : filterText.trim();
+    if (query.length < 3) return;
+    setSearchLoading(true);
+    setSearchError("");
+    searchTasks(queue, props.taskState, query, offset)
+      .then((resp) => {
+        const newMatches = resp.matches.map((task) => ({
+          ...task,
+          requestPending: false,
+        }));
+        setSearchResults({
+          query,
+          matches: existing ? [...existing.matches, ...newMatches] : newMatches,
+          scanned: (existing ? existing.scanned : 0) + resp.scanned,
+          total: resp.total,
+          nextOffset: resp.next_offset,
+          hint: resp.hint,
+        });
+      })
+      .catch((error) => {
+        setSearchError(
+          error?.response?.data || error?.message || "search failed"
+        );
+      })
+      .finally(() => {
+        setSearchLoading(false);
+      });
+  };
+
+  const clearSearch = () => {
+    setSearchResults(null);
+    setSearchError("");
+    setFilterText("");
+  };
 
   const handlePageChange = (
     event: React.MouseEvent<HTMLButtonElement> | null,
@@ -118,9 +175,11 @@ export default function TasksTable(props: Props) {
     setPage(0);
   };
 
+  const displayedTasks = searchResults ? searchResults.matches : filteredTasks;
+
   const handleSelectAllClick = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.checked) {
-      const newSelected = filteredTasks.map((t) => t.id);
+      const newSelected = displayedTasks.map((t) => t.id);
       setSelectedIds(newSelected);
     } else {
       setSelectedIds([]);
@@ -209,9 +268,11 @@ export default function TasksTable(props: Props) {
   }
 
   const fetchData = useCallback(() => {
+    // Suspend polling while showing search results (they are a snapshot).
+    if (inSearchMode) return;
     const pageOpts = { page: page + 1, size: pageSize };
     listTasks(queue, pageOpts);
-  }, [page, pageSize, queue, listTasks]);
+  }, [page, pageSize, queue, listTasks, inSearchMode]);
 
   usePolling(fetchData, pollInterval);
 
@@ -236,7 +297,7 @@ export default function TasksTable(props: Props) {
     );
   }
 
-  const rowCount = filteredTasks.length;
+  const rowCount = displayedTasks.length;
   const numSelected = selectedIds.length;
   return (
     <div>
@@ -254,10 +315,14 @@ export default function TasksTable(props: Props) {
         matchCount={filteredTasks.length}
         selectedCount={selectedIds.length}
         onPickFiltered={() => {
-          const matchingIds = filteredTasks.map((t) => t.id);
+          const matchingIds = displayedTasks.map((t) => t.id);
           setSelectedIds(Array.from(new Set([...selectedIds, ...matchingIds])));
         }}
         onUnpickAll={() => setSelectedIds([])}
+        searchableTotal={searchSupported ? props.totalTaskCount : undefined}
+        onSearchAll={searchSupported ? () => runSearch(0, null) : undefined}
+        searching={searchLoading}
+        searchError={searchError}
       />
       <TableContainer component={Paper}>
         <Table
@@ -302,7 +367,7 @@ export default function TasksTable(props: Props) {
             </TableRow>
           </TableHead>
           <TableBody>
-            {filteredTasks.map((task) => {
+            {displayedTasks.map((task) => {
               return props.renderRow({
                 key: task.id,
                 task: task,
@@ -339,30 +404,62 @@ export default function TasksTable(props: Props) {
                 colSpan={props.columns.length + 1}
                 className={classes.pagination}
               >
-                <div className={classes.paginationInner}>
-                  <div className={classes.rowsPerPage}>
-                    <Typography variant="body2" component="span">
-                      Rows per page:
-                    </Typography>
-                    <TextField
-                      type="number"
-                      size="small"
-                      variant="outlined"
-                      value={pageSize}
-                      onChange={(e) => handleRowsPerPageChange(parseInt(e.target.value, 10) || 1)}
-                      inputProps={{ min: 1, max: 500, style: { width: 50, padding: "4px 8px", textAlign: "center" } }}
-                    />
+                {searchResults ? (
+                  <div className={classes.paginationInner}>
                     <Typography variant="body2" component="span" color="textSecondary">
-                      {page * pageSize + 1}–{Math.min((page + 1) * pageSize, props.totalTaskCount)} of {props.totalTaskCount}
+                      {searchResults.hint
+                        ? `${searchResults.matches.length} ${
+                            searchResults.matches.length === 1
+                              ? "match"
+                              : "matches"
+                          } — ${searchResults.hint}`
+                        : `${searchResults.matches.length} ${
+                            searchResults.matches.length === 1
+                              ? "match"
+                              : "matches"
+                          } in first ${searchResults.scanned.toLocaleString()} of ${searchResults.total.toLocaleString()}`}
                     </Typography>
+                    {searchResults.nextOffset !== null && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="primary"
+                        disabled={searchLoading}
+                        onClick={() => runSearch(searchResults.nextOffset!, searchResults)}
+                      >
+                        Search deeper
+                      </Button>
+                    )}
+                    <Button size="small" variant="outlined" onClick={clearSearch}>
+                      Clear
+                    </Button>
                   </div>
-                  <TablePaginationActions
-                    count={props.totalTaskCount}
-                    page={page}
-                    rowsPerPage={pageSize}
-                    onPageChange={handlePageChange}
-                  />
-                </div>
+                ) : (
+                  <div className={classes.paginationInner}>
+                    <div className={classes.rowsPerPage}>
+                      <Typography variant="body2" component="span">
+                        Rows per page:
+                      </Typography>
+                      <TextField
+                        type="number"
+                        size="small"
+                        variant="outlined"
+                        value={pageSize}
+                        onChange={(e) => handleRowsPerPageChange(parseInt(e.target.value, 10) || 1)}
+                        inputProps={{ min: 1, max: 500, style: { width: 50, padding: "4px 8px", textAlign: "center" } }}
+                      />
+                      <Typography variant="body2" component="span" color="textSecondary">
+                        {page * pageSize + 1}–{Math.min((page + 1) * pageSize, props.totalTaskCount)} of {props.totalTaskCount}
+                      </Typography>
+                    </div>
+                    <TablePaginationActions
+                      count={props.totalTaskCount}
+                      page={page}
+                      rowsPerPage={pageSize}
+                      onPageChange={handlePageChange}
+                    />
+                  </div>
+                )}
               </TableCell>
             </TableRow>
           </TableFooter>
