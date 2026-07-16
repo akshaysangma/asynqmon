@@ -19,14 +19,16 @@ import ArchiveIcon from "@material-ui/icons/Archive";
 import CancelIcon from "@material-ui/icons/Cancel";
 import Alert from "@material-ui/lab/Alert";
 import AlertTitle from "@material-ui/lab/AlertTitle";
+import { Link } from "react-router-dom";
 import TablePaginationActions from "./TablePaginationActions";
 import TableActions from "./TableActions";
 import TaskIdFilterToolbar from "./TaskIdFilterToolbar";
 import { usePolling } from "../hooks";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
-import { PaginationOptions, searchTasks } from "../api";
+import { PaginationOptions, searchTasks, getTaskInfo } from "../api";
 import { TaskState } from "../types/taskState";
+import { queueDetailsPath } from "../paths";
 
 const useStyles = makeStyles((theme) => ({
   table: {
@@ -53,6 +55,17 @@ const useStyles = makeStyles((theme) => ({
     display: "flex",
     alignItems: "center",
     gap: "8px",
+  },
+  idHeaderCell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+  },
+  idLookupInput: {
+    width: 130,
+    "& .MuiInputBase-root": {
+      fontSize: "0.75rem",
+    },
   },
 }));
 
@@ -95,8 +108,17 @@ interface SearchResults {
   scanned: number; // cumulative tasks examined across [Search deeper] hops
   total: number;
   nextOffset: number | null;
-  hint?: string;
 }
+
+// Outcome of an exact-ID lookup on the ID column. The task/foundState fields
+// only exist on the statuses where they're meaningful, so a caller can't read
+// a stale task from a "not-found" result.
+type IdLookupState =
+  | { query: string; status: "loading" }
+  | { query: string; status: "found"; task: TaskInfoExtended }
+  | { query: string; status: "wrong-state"; foundState: string }
+  | { query: string; status: "not-found" }
+  | { query: string; status: "error"; message: string };
 
 export default function TasksTable(props: Props) {
   const { pollInterval, listTasks, queue, pageSize } = props;
@@ -110,6 +132,8 @@ export default function TasksTable(props: Props) {
   );
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const [idLookupInput, setIdLookupInput] = useState("");
+  const [idLookup, setIdLookup] = useState<IdLookupState | null>(null);
 
   const filteredTasks = useMemo(() => {
     const q = filterText.toLowerCase().trim();
@@ -125,10 +149,61 @@ export default function TasksTable(props: Props) {
   // has its own group-scoped container.
   const searchSupported = props.taskState !== "aggregating";
   const inSearchMode = searchResults !== null;
+  const inLookupMode = idLookup !== null;
+
+  const clearIdLookup = () => {
+    setIdLookup(null);
+    setIdLookupInput("");
+  };
+
+  // Entering exact-ID lookup mode and cross-page search mode are mutually
+  // exclusive result views, so starting one clears the other.
+  const submitIdLookup = () => {
+    const id = idLookupInput.trim();
+    if (!id) return;
+    clearSearch();
+    setIdLookup({ query: id, status: "loading" });
+    // Only the lookup still in flight may resolve — a late response must not
+    // overwrite a newer lookup or resurrect the view after Clear.
+    const resolve = (next: IdLookupState) =>
+      setIdLookup((cur) =>
+        cur && cur.status === "loading" && cur.query === id ? next : cur
+      );
+    getTaskInfo(queue, id)
+      .then((taskInfo) => {
+        if (taskInfo.state === props.taskState) {
+          resolve({
+            query: id,
+            status: "found",
+            task: { ...taskInfo, requestPending: false },
+          });
+        } else {
+          resolve({
+            query: id,
+            status: "wrong-state",
+            foundState: taskInfo.state,
+          });
+        }
+      })
+      .catch((error) => {
+        // Only a 404 means "no such task" — anything else is a failed lookup,
+        // not an authoritative absence.
+        if (error?.response?.status === 404) {
+          resolve({ query: id, status: "not-found" });
+        } else {
+          resolve({
+            query: id,
+            status: "error",
+            message: error?.response?.data || error?.message || "lookup failed",
+          });
+        }
+      });
+  };
 
   const runSearch = (offset: number, existing: SearchResults | null) => {
     const query = existing ? existing.query : filterText.trim();
     if (query.length < 3) return;
+    if (!existing) clearIdLookup();
     setSearchLoading(true);
     setSearchError("");
     searchTasks(queue, props.taskState, query, offset)
@@ -143,7 +218,6 @@ export default function TasksTable(props: Props) {
           scanned: (existing ? existing.scanned : 0) + resp.scanned,
           total: resp.total,
           nextOffset: resp.next_offset,
-          hint: resp.hint,
         });
       })
       .catch((error) => {
@@ -175,7 +249,13 @@ export default function TasksTable(props: Props) {
     setPage(0);
   };
 
-  const displayedTasks = searchResults ? searchResults.matches : filteredTasks;
+  const displayedTasks = idLookup
+    ? idLookup.status === "found"
+      ? [idLookup.task]
+      : []
+    : searchResults
+    ? searchResults.matches
+    : filteredTasks;
 
   const handleSelectAllClick = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.checked) {
@@ -268,11 +348,12 @@ export default function TasksTable(props: Props) {
   }
 
   const fetchData = useCallback(() => {
-    // Suspend polling while showing search results (they are a snapshot).
-    if (inSearchMode) return;
+    // Suspend polling while showing search results or an ID lookup result
+    // (both are point-in-time snapshots, not the live table).
+    if (inSearchMode || inLookupMode) return;
     const pageOpts = { page: page + 1, size: pageSize };
     listTasks(queue, pageOpts);
-  }, [page, pageSize, queue, listTasks, inSearchMode]);
+  }, [page, pageSize, queue, listTasks, inSearchMode, inLookupMode]);
 
   usePolling(fetchData, pollInterval);
 
@@ -311,8 +392,8 @@ export default function TasksTable(props: Props) {
       <TaskIdFilterToolbar
         filter={filterText}
         onFilterChange={setFilterText}
-        totalCount={props.tasks.length}
-        matchCount={filteredTasks.length}
+        totalCount={searchResults ? searchResults.scanned : props.tasks.length}
+        matchCount={displayedTasks.length}
         selectedCount={selectedIds.length}
         onPickFiltered={() => {
           const matchingIds = displayedTasks.map((t) => t.id);
@@ -361,7 +442,24 @@ export default function TasksTable(props: Props) {
                     align={col.align}
                     classes={{ stickyHeader: classes.stickyHeaderCell }}
                   >
-                    {col.label}
+                    {col.key === "id" ? (
+                      <div className={classes.idHeaderCell}>
+                        {col.label}
+                        <TextField
+                          className={classes.idLookupInput}
+                          size="small"
+                          variant="outlined"
+                          placeholder="exact ID…"
+                          value={idLookupInput}
+                          onChange={(e) => setIdLookupInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") submitIdLookup();
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      col.label
+                    )}
                   </TableCell>
                 ))}
             </TableRow>
@@ -404,20 +502,43 @@ export default function TasksTable(props: Props) {
                 colSpan={props.columns.length + 1}
                 className={classes.pagination}
               >
-                {searchResults ? (
+                {idLookup ? (
+                  <div className={classes.paginationInner}>
+                    <Typography
+                      variant="body2"
+                      component="span"
+                      color={
+                        idLookup.status === "error" ? "error" : "textSecondary"
+                      }
+                    >
+                      {idLookup.status === "loading" &&
+                        `Looking up "${idLookup.query}"…`}
+                      {idLookup.status === "found" &&
+                        `Found task "${idLookup.query}"`}
+                      {idLookup.status === "wrong-state" && (
+                        <>
+                          Task "{idLookup.query}" exists in the{" "}
+                          <Link to={queueDetailsPath(queue, idLookup.foundState)}>
+                            {idLookup.foundState}
+                          </Link>{" "}
+                          state
+                        </>
+                      )}
+                      {idLookup.status === "not-found" &&
+                        "No task with this ID in this queue."}
+                      {idLookup.status === "error" &&
+                        `Lookup failed: ${idLookup.message}`}
+                    </Typography>
+                    <Button size="small" variant="outlined" onClick={clearIdLookup}>
+                      Clear
+                    </Button>
+                  </div>
+                ) : searchResults ? (
                   <div className={classes.paginationInner}>
                     <Typography variant="body2" component="span" color="textSecondary">
-                      {searchResults.hint
-                        ? `${searchResults.matches.length} ${
-                            searchResults.matches.length === 1
-                              ? "match"
-                              : "matches"
-                          } — ${searchResults.hint}`
-                        : `${searchResults.matches.length} ${
-                            searchResults.matches.length === 1
-                              ? "match"
-                              : "matches"
-                          } in first ${searchResults.scanned.toLocaleString()} of ${searchResults.total.toLocaleString()}`}
+                      {`${searchResults.matches.length} ${
+                        searchResults.matches.length === 1 ? "match" : "matches"
+                      } in first ${searchResults.scanned.toLocaleString()} of ${searchResults.total.toLocaleString()}`}
                     </Typography>
                     {searchResults.nextOffset !== null && (
                       <Button

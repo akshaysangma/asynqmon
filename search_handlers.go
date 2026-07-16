@@ -1,7 +1,6 @@
 package asynqmon
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -37,8 +36,6 @@ type searchTasksResponse struct {
 	Total int `json:"total"`
 	// Ascending index to resume scanning from; null when the state is exhausted.
 	NextOffset *int `json:"next_offset"`
-	// Optional human-readable note (e.g. exact-ID lookup outcome).
-	Hint string `json:"hint,omitempty"`
 }
 
 // newSearchTasksHandlerFunc returns a handler for
@@ -52,7 +49,11 @@ type searchTasksResponse struct {
 // Consistency caveat: windows are not one atomic snapshot; on a fast-churning
 // state, offsets can drift between requests, so a task may be missed or seen
 // twice across windows. Zset-backed states (scheduled/retry/archived/completed)
-// drift slowly.
+// drift slowly. Archived and completed are scanned newest-first (matching
+// their list tabs' display order), so their drift direction is arrival-shifting:
+// new arrivals between hops push desc offsets forward, making a previously
+// seen task reappear rather than the append-stable "new tasks land past the
+// scanned tail" drift the other, ascending-scanned states have.
 func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter, rf ResultFormatter, window int) http.HandlerFunc {
 	if window <= 0 {
 		window = searchDefaultWindow
@@ -136,44 +137,25 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter, 
 			convert = func(ti *asynq.TaskInfo) interface{} { return toRetryTask(ti, pf) }
 		case "archived":
 			total = qinfo.Archived
-			list = func(page, size int) ([]*asynq.TaskInfo, error) {
+			ascList := func(page, size int) ([]*asynq.TaskInfo, error) {
 				return inspector.ListArchivedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+			}
+			list = func(page, size int) ([]*asynq.TaskInfo, error) {
+				return listTasksDesc(ascList, total, page, size)
 			}
 			convert = func(ti *asynq.TaskInfo) interface{} { return toArchivedTask(ti, pf) }
 		case "completed":
 			total = qinfo.Completed
-			list = func(page, size int) ([]*asynq.TaskInfo, error) {
+			ascList := func(page, size int) ([]*asynq.TaskInfo, error) {
 				return inspector.ListCompletedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+			}
+			list = func(page, size int) ([]*asynq.TaskInfo, error) {
+				return listTasksDesc(ascList, total, page, size)
 			}
 			convert = func(ti *asynq.TaskInfo) interface{} { return toCompletedTask(ti, pf, rf) }
 		default:
 			http.Error(w, fmt.Sprintf("unsupported state %q: must be one of pending, active, scheduled, retry, archived, completed", state), http.StatusBadRequest)
 			return
-		}
-
-		// Exact-ID fast path: a full task ID is the hash key itself, so an
-		// O(1) lookup answers instantly regardless of state size. It only
-		// short-circuits on a same-state hit — otherwise the scan still runs,
-		// because payloads may contain the UUID as text.
-		var hint string
-		if looksLikeTaskID(q) {
-			ti, err := inspector.GetTaskInfo(qname, q)
-			switch {
-			case err == nil && ti.State.String() == state:
-				writeResponseJSON(w, searchTasksResponse{
-					Matches: []interface{}{convert(ti)},
-					Total:   total,
-					Hint:    "found by exact task ID (no scan needed)",
-				})
-				return
-			case err == nil:
-				hint = fmt.Sprintf("a task with this exact ID exists in the %q state", ti.State)
-			case errors.Is(err, asynq.ErrTaskNotFound) || errors.Is(err, asynq.ErrQueueNotFound):
-				hint = "no task with this exact ID in this queue"
-			default:
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
 		}
 
 		matches, scanned, exhausted, err := scanForMatches(list, convert, pf, q, offset, window)
@@ -186,7 +168,6 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter, 
 			Matches: matches,
 			Scanned: scanned,
 			Total:   total,
-			Hint:    hint,
 		}
 		if !exhausted && offset+scanned < total {
 			next := offset + scanned
@@ -252,28 +233,6 @@ func taskMatchesQuery(ti *asynq.TaskInfo, loweredQuery string, pf PayloadFormatt
 	return strings.Contains(strings.ToLower(ti.ID), loweredQuery) ||
 		strings.Contains(strings.ToLower(ti.Type), loweredQuery) ||
 		strings.Contains(strings.ToLower(pf.FormatPayload(ti.Type, ti.Payload)), loweredQuery)
-}
-
-// looksLikeTaskID reports whether s has the canonical UUID shape asynq task
-// IDs use (8-4-4-4-12 hex groups).
-func looksLikeTaskID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, r := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if r != '-' {
-				return false
-			}
-		default:
-			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
-			if !isHex {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // activeWorkersByTaskID maps task ID to worker info for the queue's active

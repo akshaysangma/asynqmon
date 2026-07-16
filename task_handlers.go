@@ -244,15 +244,9 @@ func newListArchivedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForma
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var tasks []*asynq.TaskInfo
-		if isDescOrder(r) {
-			tasks, err = listTasksDesc(func(page, size int) ([]*asynq.TaskInfo, error) {
-				return inspector.ListArchivedTasks(qname, asynq.PageSize(size), asynq.Page(page))
-			}, qinfo.Archived, pageNum, pageSize)
-		} else {
-			tasks, err = inspector.ListArchivedTasks(
-				qname, asynq.PageSize(pageSize), asynq.Page(pageNum))
-		}
+		tasks, err := listTasksOrdered(r, func(page, size int) ([]*asynq.TaskInfo, error) {
+			return inspector.ListArchivedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+		}, qinfo.Archived, pageNum, pageSize)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -279,14 +273,9 @@ func newListCompletedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForm
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var tasks []*asynq.TaskInfo
-		if isDescOrder(r) {
-			tasks, err = listTasksDesc(func(page, size int) ([]*asynq.TaskInfo, error) {
-				return inspector.ListCompletedTasks(qname, asynq.PageSize(size), asynq.Page(page))
-			}, qinfo.Completed, pageNum, pageSize)
-		} else {
-			tasks, err = inspector.ListCompletedTasks(qname, asynq.PageSize(pageSize), asynq.Page(pageNum))
-		}
+		tasks, err := listTasksOrdered(r, func(page, size int) ([]*asynq.TaskInfo, error) {
+			return inspector.ListCompletedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+		}, qinfo.Completed, pageNum, pageSize)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -777,6 +766,16 @@ func listTasksDesc(
 		out[len(window)-1-i] = t
 	}
 	return out, nil
+}
+
+// listTasksOrdered returns the requested page in the order the request asks
+// for: ascending (Inspector-native) by default, newest-first via
+// listTasksDesc when order=desc.
+func listTasksOrdered(r *http.Request, list func(page, size int) ([]*asynq.TaskInfo, error), total, pageNum, pageSize int) ([]*asynq.TaskInfo, error) {
+	if isDescOrder(r) {
+		return listTasksDesc(list, total, pageNum, pageSize)
+	}
+	return list(pageNum, pageSize)
 }
 
 // getPageOptions read page size and number from the request url if set,

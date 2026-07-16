@@ -369,7 +369,6 @@ export interface SearchTasksResponse {
   scanned: number; // tasks examined by this request
   total: number; // state size at request time
   next_offset: number | null; // null when the whole state has been scanned
-  hint?: string; // exact-ID lookup outcome, when the query was a full task ID
 }
 
 export async function searchTasks(
