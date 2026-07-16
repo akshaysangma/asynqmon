@@ -32,6 +32,11 @@ const useStyles = makeStyles((theme) => ({
     color: theme.palette.success.main,
     marginLeft: theme.spacing(1),
   },
+  searchError: {
+    fontSize: "0.8rem",
+    color: theme.palette.error.main,
+    marginLeft: theme.spacing(1),
+  },
 }));
 
 interface TaskIdFilterToolbarProps {
@@ -42,6 +47,12 @@ interface TaskIdFilterToolbarProps {
   selectedCount: number;
   onPickFiltered: () => void;
   onUnpickAll: () => void;
+
+  // Cross-page search (absent for states that don't support it).
+  searchableTotal?: number; // total tasks in the state, for the button label
+  onSearchAll?: () => void;
+  searching?: boolean;
+  searchError?: string;
 }
 
 export default function TaskIdFilterToolbar(props: TaskIdFilterToolbarProps) {
@@ -53,6 +64,10 @@ export default function TaskIdFilterToolbar(props: TaskIdFilterToolbarProps) {
     selectedCount,
     onPickFiltered,
     onUnpickAll,
+    searchableTotal,
+    onSearchAll,
+    searching,
+    searchError,
   } = props;
   const classes = useStyles();
   const [feedback, setFeedback] = useState("");
@@ -87,6 +102,9 @@ export default function TaskIdFilterToolbar(props: TaskIdFilterToolbarProps) {
     showFeedback("Cleared selection");
   };
 
+  const searchReady =
+    onSearchAll !== undefined && filter.trim().length >= 3 && !searching;
+
   return (
     <div className={classes.toolbar}>
       <TextField
@@ -96,7 +114,23 @@ export default function TaskIdFilterToolbar(props: TaskIdFilterToolbarProps) {
         placeholder="Filter by ID or payload..."
         value={filter}
         onChange={(e) => onFilterChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && searchReady) {
+            onSearchAll!();
+          }
+        }}
       />
+      {onSearchAll !== undefined && filter.trim().length >= 3 && (
+        <Button
+          size="small"
+          variant="outlined"
+          color="primary"
+          onClick={onSearchAll}
+          disabled={searching}
+        >
+          Search all {(searchableTotal || 0).toLocaleString()}
+        </Button>
+      )}
       <Button
         size="small"
         variant="outlined"
@@ -120,6 +154,16 @@ export default function TaskIdFilterToolbar(props: TaskIdFilterToolbarProps) {
       {feedback && (
         <Typography className={classes.feedback} component="span">
           {feedback}
+        </Typography>
+      )}
+      {searching && (
+        <Typography className={classes.stats} component="span">
+          searching…
+        </Typography>
+      )}
+      {searchError && (
+        <Typography className={classes.searchError} component="span">
+          {searchError}
         </Typography>
       )}
     </div>

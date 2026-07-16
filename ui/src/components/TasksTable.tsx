@@ -8,6 +8,7 @@ import TableHead from "@material-ui/core/TableHead";
 import TableRow from "@material-ui/core/TableRow";
 import TableFooter from "@material-ui/core/TableFooter";
 import Paper from "@material-ui/core/Paper";
+import Button from "@material-ui/core/Button";
 import Checkbox from "@material-ui/core/Checkbox";
 import IconButton from "@material-ui/core/IconButton";
 import TextField from "@material-ui/core/TextField";
@@ -18,14 +19,16 @@ import ArchiveIcon from "@material-ui/icons/Archive";
 import CancelIcon from "@material-ui/icons/Cancel";
 import Alert from "@material-ui/lab/Alert";
 import AlertTitle from "@material-ui/lab/AlertTitle";
+import { Link } from "react-router-dom";
 import TablePaginationActions from "./TablePaginationActions";
 import TableActions from "./TableActions";
 import TaskIdFilterToolbar from "./TaskIdFilterToolbar";
 import { usePolling } from "../hooks";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
-import { PaginationOptions } from "../api";
+import { PaginationOptions, searchTasks, getTaskInfo } from "../api";
 import { TaskState } from "../types/taskState";
+import { queueDetailsPath } from "../paths";
 
 const useStyles = makeStyles((theme) => ({
   table: {
@@ -52,6 +55,17 @@ const useStyles = makeStyles((theme) => ({
     display: "flex",
     alignItems: "center",
     gap: "8px",
+  },
+  idHeaderCell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+  },
+  idLookupInput: {
+    width: 130,
+    "& .MuiInputBase-root": {
+      fontSize: "0.75rem",
+    },
   },
 }));
 
@@ -87,6 +101,25 @@ interface Props {
   renderRow: (rowProps: RowProps) => JSX.Element;
 }
 
+// Snapshot of an in-progress cross-page search; null when the live table is shown.
+interface SearchResults {
+  query: string;
+  matches: TaskInfoExtended[];
+  scanned: number; // cumulative tasks examined across [Search deeper] hops
+  total: number;
+  nextOffset: number | null;
+}
+
+// Outcome of an exact-ID lookup on the ID column. The task/foundState fields
+// only exist on the statuses where they're meaningful, so a caller can't read
+// a stale task from a "not-found" result.
+type IdLookupState =
+  | { query: string; status: "loading" }
+  | { query: string; status: "found"; task: TaskInfoExtended }
+  | { query: string; status: "wrong-state"; foundState: string }
+  | { query: string; status: "not-found" }
+  | { query: string; status: "error"; message: string };
+
 export default function TasksTable(props: Props) {
   const { pollInterval, listTasks, queue, pageSize } = props;
   const classes = useStyles();
@@ -94,6 +127,13 @@ export default function TasksTable(props: Props) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string>("");
   const [filterText, setFilterText] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResults | null>(
+    null
+  );
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [idLookupInput, setIdLookupInput] = useState("");
+  const [idLookup, setIdLookup] = useState<IdLookupState | null>(null);
 
   const filteredTasks = useMemo(() => {
     const q = filterText.toLowerCase().trim();
@@ -104,6 +144,97 @@ export default function TasksTable(props: Props) {
         (t.payload && t.payload.toLowerCase().includes(q))
     );
   }, [props.tasks, filterText]);
+
+  // Search only wires into the plain per-state tables; the aggregating table
+  // has its own group-scoped container.
+  const searchSupported = props.taskState !== "aggregating";
+  const inSearchMode = searchResults !== null;
+  const inLookupMode = idLookup !== null;
+
+  const clearIdLookup = () => {
+    setIdLookup(null);
+    setIdLookupInput("");
+  };
+
+  // Entering exact-ID lookup mode and cross-page search mode are mutually
+  // exclusive result views, so starting one clears the other.
+  const submitIdLookup = () => {
+    const id = idLookupInput.trim();
+    if (!id) return;
+    clearSearch();
+    setIdLookup({ query: id, status: "loading" });
+    // Only the lookup still in flight may resolve — a late response must not
+    // overwrite a newer lookup or resurrect the view after Clear.
+    const resolve = (next: IdLookupState) =>
+      setIdLookup((cur) =>
+        cur && cur.status === "loading" && cur.query === id ? next : cur
+      );
+    getTaskInfo(queue, id)
+      .then((taskInfo) => {
+        if (taskInfo.state === props.taskState) {
+          resolve({
+            query: id,
+            status: "found",
+            task: { ...taskInfo, requestPending: false },
+          });
+        } else {
+          resolve({
+            query: id,
+            status: "wrong-state",
+            foundState: taskInfo.state,
+          });
+        }
+      })
+      .catch((error) => {
+        // Only a 404 means "no such task" — anything else is a failed lookup,
+        // not an authoritative absence.
+        if (error?.response?.status === 404) {
+          resolve({ query: id, status: "not-found" });
+        } else {
+          resolve({
+            query: id,
+            status: "error",
+            message: error?.response?.data || error?.message || "lookup failed",
+          });
+        }
+      });
+  };
+
+  const runSearch = (offset: number, existing: SearchResults | null) => {
+    const query = existing ? existing.query : filterText.trim();
+    if (query.length < 3) return;
+    if (!existing) clearIdLookup();
+    setSearchLoading(true);
+    setSearchError("");
+    searchTasks(queue, props.taskState, query, offset)
+      .then((resp) => {
+        const newMatches = resp.matches.map((task) => ({
+          ...task,
+          requestPending: false,
+        }));
+        setSearchResults({
+          query,
+          matches: existing ? [...existing.matches, ...newMatches] : newMatches,
+          scanned: (existing ? existing.scanned : 0) + resp.scanned,
+          total: resp.total,
+          nextOffset: resp.next_offset,
+        });
+      })
+      .catch((error) => {
+        setSearchError(
+          error?.response?.data || error?.message || "search failed"
+        );
+      })
+      .finally(() => {
+        setSearchLoading(false);
+      });
+  };
+
+  const clearSearch = () => {
+    setSearchResults(null);
+    setSearchError("");
+    setFilterText("");
+  };
 
   const handlePageChange = (
     event: React.MouseEvent<HTMLButtonElement> | null,
@@ -118,9 +249,17 @@ export default function TasksTable(props: Props) {
     setPage(0);
   };
 
+  const displayedTasks = idLookup
+    ? idLookup.status === "found"
+      ? [idLookup.task]
+      : []
+    : searchResults
+    ? searchResults.matches
+    : filteredTasks;
+
   const handleSelectAllClick = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.checked) {
-      const newSelected = filteredTasks.map((t) => t.id);
+      const newSelected = displayedTasks.map((t) => t.id);
       setSelectedIds(newSelected);
     } else {
       setSelectedIds([]);
@@ -209,9 +348,12 @@ export default function TasksTable(props: Props) {
   }
 
   const fetchData = useCallback(() => {
+    // Suspend polling while showing search results or an ID lookup result
+    // (both are point-in-time snapshots, not the live table).
+    if (inSearchMode || inLookupMode) return;
     const pageOpts = { page: page + 1, size: pageSize };
     listTasks(queue, pageOpts);
-  }, [page, pageSize, queue, listTasks]);
+  }, [page, pageSize, queue, listTasks, inSearchMode, inLookupMode]);
 
   usePolling(fetchData, pollInterval);
 
@@ -236,7 +378,7 @@ export default function TasksTable(props: Props) {
     );
   }
 
-  const rowCount = filteredTasks.length;
+  const rowCount = displayedTasks.length;
   const numSelected = selectedIds.length;
   return (
     <div>
@@ -250,14 +392,18 @@ export default function TasksTable(props: Props) {
       <TaskIdFilterToolbar
         filter={filterText}
         onFilterChange={setFilterText}
-        totalCount={props.tasks.length}
-        matchCount={filteredTasks.length}
+        totalCount={searchResults ? searchResults.scanned : props.tasks.length}
+        matchCount={displayedTasks.length}
         selectedCount={selectedIds.length}
         onPickFiltered={() => {
-          const matchingIds = filteredTasks.map((t) => t.id);
+          const matchingIds = displayedTasks.map((t) => t.id);
           setSelectedIds(Array.from(new Set([...selectedIds, ...matchingIds])));
         }}
         onUnpickAll={() => setSelectedIds([])}
+        searchableTotal={searchSupported ? props.totalTaskCount : undefined}
+        onSearchAll={searchSupported ? () => runSearch(0, null) : undefined}
+        searching={searchLoading}
+        searchError={searchError}
       />
       <TableContainer component={Paper}>
         <Table
@@ -296,13 +442,30 @@ export default function TasksTable(props: Props) {
                     align={col.align}
                     classes={{ stickyHeader: classes.stickyHeaderCell }}
                   >
-                    {col.label}
+                    {col.key === "id" ? (
+                      <div className={classes.idHeaderCell}>
+                        {col.label}
+                        <TextField
+                          className={classes.idLookupInput}
+                          size="small"
+                          variant="outlined"
+                          placeholder="exact ID…"
+                          value={idLookupInput}
+                          onChange={(e) => setIdLookupInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") submitIdLookup();
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      col.label
+                    )}
                   </TableCell>
                 ))}
             </TableRow>
           </TableHead>
           <TableBody>
-            {filteredTasks.map((task) => {
+            {displayedTasks.map((task) => {
               return props.renderRow({
                 key: task.id,
                 task: task,
@@ -339,30 +502,85 @@ export default function TasksTable(props: Props) {
                 colSpan={props.columns.length + 1}
                 className={classes.pagination}
               >
-                <div className={classes.paginationInner}>
-                  <div className={classes.rowsPerPage}>
-                    <Typography variant="body2" component="span">
-                      Rows per page:
+                {idLookup ? (
+                  <div className={classes.paginationInner}>
+                    <Typography
+                      variant="body2"
+                      component="span"
+                      color={
+                        idLookup.status === "error" ? "error" : "textSecondary"
+                      }
+                    >
+                      {idLookup.status === "loading" &&
+                        `Looking up "${idLookup.query}"…`}
+                      {idLookup.status === "found" &&
+                        `Found task "${idLookup.query}"`}
+                      {idLookup.status === "wrong-state" && (
+                        <>
+                          Task "{idLookup.query}" exists in the{" "}
+                          <Link to={queueDetailsPath(queue, idLookup.foundState)}>
+                            {idLookup.foundState}
+                          </Link>{" "}
+                          state
+                        </>
+                      )}
+                      {idLookup.status === "not-found" &&
+                        "No task with this ID in this queue."}
+                      {idLookup.status === "error" &&
+                        `Lookup failed: ${idLookup.message}`}
                     </Typography>
-                    <TextField
-                      type="number"
-                      size="small"
-                      variant="outlined"
-                      value={pageSize}
-                      onChange={(e) => handleRowsPerPageChange(parseInt(e.target.value, 10) || 1)}
-                      inputProps={{ min: 1, max: 500, style: { width: 50, padding: "4px 8px", textAlign: "center" } }}
-                    />
-                    <Typography variant="body2" component="span" color="textSecondary">
-                      {page * pageSize + 1}–{Math.min((page + 1) * pageSize, props.totalTaskCount)} of {props.totalTaskCount}
-                    </Typography>
+                    <Button size="small" variant="outlined" onClick={clearIdLookup}>
+                      Clear
+                    </Button>
                   </div>
-                  <TablePaginationActions
-                    count={props.totalTaskCount}
-                    page={page}
-                    rowsPerPage={pageSize}
-                    onPageChange={handlePageChange}
-                  />
-                </div>
+                ) : searchResults ? (
+                  <div className={classes.paginationInner}>
+                    <Typography variant="body2" component="span" color="textSecondary">
+                      {`${searchResults.matches.length} ${
+                        searchResults.matches.length === 1 ? "match" : "matches"
+                      } in first ${searchResults.scanned.toLocaleString()} of ${searchResults.total.toLocaleString()}`}
+                    </Typography>
+                    {searchResults.nextOffset !== null && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="primary"
+                        disabled={searchLoading}
+                        onClick={() => runSearch(searchResults.nextOffset!, searchResults)}
+                      >
+                        Search deeper
+                      </Button>
+                    )}
+                    <Button size="small" variant="outlined" onClick={clearSearch}>
+                      Clear
+                    </Button>
+                  </div>
+                ) : (
+                  <div className={classes.paginationInner}>
+                    <div className={classes.rowsPerPage}>
+                      <Typography variant="body2" component="span">
+                        Rows per page:
+                      </Typography>
+                      <TextField
+                        type="number"
+                        size="small"
+                        variant="outlined"
+                        value={pageSize}
+                        onChange={(e) => handleRowsPerPageChange(parseInt(e.target.value, 10) || 1)}
+                        inputProps={{ min: 1, max: 500, style: { width: 50, padding: "4px 8px", textAlign: "center" } }}
+                      />
+                      <Typography variant="body2" component="span" color="textSecondary">
+                        {page * pageSize + 1}–{Math.min((page + 1) * pageSize, props.totalTaskCount)} of {props.totalTaskCount}
+                      </Typography>
+                    </div>
+                    <TablePaginationActions
+                      count={props.totalTaskCount}
+                      page={page}
+                      rowsPerPage={pageSize}
+                      onPageChange={handlePageChange}
+                    />
+                  </div>
+                )}
               </TableCell>
             </TableRow>
           </TableFooter>

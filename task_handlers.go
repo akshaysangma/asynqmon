@@ -239,13 +239,14 @@ func newListArchivedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForma
 		vars := mux.Vars(r)
 		qname := vars["qname"]
 		pageSize, pageNum := getPageOptions(r)
-		tasks, err := inspector.ListArchivedTasks(
-			qname, asynq.PageSize(pageSize), asynq.Page(pageNum))
+		qinfo, err := inspector.GetQueueInfo(qname)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		qinfo, err := inspector.GetQueueInfo(qname)
+		tasks, err := listTasksOrdered(r, func(page, size int) ([]*asynq.TaskInfo, error) {
+			return inspector.ListArchivedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+		}, qinfo.Archived, pageNum, pageSize)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -267,12 +268,14 @@ func newListCompletedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForm
 		vars := mux.Vars(r)
 		qname := vars["qname"]
 		pageSize, pageNum := getPageOptions(r)
-		tasks, err := inspector.ListCompletedTasks(qname, asynq.PageSize(pageSize), asynq.Page(pageNum))
+		qinfo, err := inspector.GetQueueInfo(qname)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		qinfo, err := inspector.GetQueueInfo(qname)
+		tasks, err := listTasksOrdered(r, func(page, size int) ([]*asynq.TaskInfo, error) {
+			return inspector.ListCompletedTasks(qname, asynq.PageSize(size), asynq.Page(page))
+		}, qinfo.Completed, pageNum, pageSize)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -698,6 +701,81 @@ func newBatchArchiveTasksHandlerFunc(inspector *asynq.Inspector) http.HandlerFun
 		}
 		writeResponseJSON(w, resp)
 	}
+}
+
+// isDescOrder reports whether the request asks for descending (newest-first) order.
+func isDescOrder(r *http.Request) bool {
+	return r.URL.Query().Get("order") == "desc"
+}
+
+// listTasksDesc returns the requested page of tasks in descending order using
+// only ascending list calls. asynq's archived and completed sorted sets are
+// ordered ascending by score (archived: last-failed time, completed:
+// expiration time), so desc page K (1-based) of size P mirrors the ascending
+// index window [total-K*P, total-(K-1)*P). When total is not a multiple of P
+// that window straddles two adjacent ascending pages, so up to two fetches are
+// needed; the window is then sliced out and reversed.
+//
+// Drift caveat: total comes from a separate stats call, and archived/completed
+// sets churn (slowly) between polls, so page boundaries may shift by a few
+// tasks between the stats fetch and the list fetch. Indices are clamped so
+// drift yields a slightly stale page rather than a panic.
+func listTasksDesc(
+	list func(page, size int) ([]*asynq.TaskInfo, error),
+	total, pageNum, pageSize int,
+) ([]*asynq.TaskInfo, error) {
+	if pageSize <= 0 || pageNum <= 0 {
+		return nil, nil
+	}
+	// Ascending index window mirrored by the requested descending page.
+	start := total - pageNum*pageSize
+	end := total - (pageNum-1)*pageSize
+	if end <= 0 {
+		// Page is out of range.
+		return nil, nil
+	}
+	if start < 0 {
+		// Last descending page may be short.
+		start = 0
+	}
+	firstPage := start/pageSize + 1 // 1-based ascending page containing index start
+	offset := start - (firstPage-1)*pageSize
+	tasks, err := list(firstPage, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	if offset+(end-start) > len(tasks) {
+		// Window straddles the next ascending page (total % pageSize != 0).
+		next, err := list(firstPage+1, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, next...)
+	}
+	// Clamp against drift between the stats fetch and the list fetches.
+	if offset > len(tasks) {
+		offset = len(tasks)
+	}
+	n := end - start
+	if offset+n > len(tasks) {
+		n = len(tasks) - offset
+	}
+	window := tasks[offset : offset+n]
+	out := make([]*asynq.TaskInfo, len(window))
+	for i, t := range window {
+		out[len(window)-1-i] = t
+	}
+	return out, nil
+}
+
+// listTasksOrdered returns the requested page in the order the request asks
+// for: ascending (Inspector-native) by default, newest-first via
+// listTasksDesc when order=desc.
+func listTasksOrdered(r *http.Request, list func(page, size int) ([]*asynq.TaskInfo, error), total, pageNum, pageSize int) ([]*asynq.TaskInfo, error) {
+	if isDescOrder(r) {
+		return listTasksDesc(list, total, pageNum, pageSize)
+	}
+	return list(pageNum, pageSize)
 }
 
 // getPageOptions read page size and number from the request url if set,

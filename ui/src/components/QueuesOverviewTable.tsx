@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import clsx from "clsx";
+import { connect, ConnectedProps } from "react-redux";
 import { Link } from "react-router-dom";
 import { makeStyles } from "@material-ui/core/styles";
 import Table from "@material-ui/core/Table";
@@ -9,16 +10,24 @@ import TableContainer from "@material-ui/core/TableContainer";
 import TableHead from "@material-ui/core/TableHead";
 import TableRow from "@material-ui/core/TableRow";
 import TableSortLabel from "@material-ui/core/TableSortLabel";
+import Checkbox from "@material-ui/core/Checkbox";
 import IconButton from "@material-ui/core/IconButton";
+import ListItemText from "@material-ui/core/ListItemText";
+import Menu from "@material-ui/core/Menu";
+import MenuItem from "@material-ui/core/MenuItem";
 import Tooltip from "@material-ui/core/Tooltip";
 import PauseCircleFilledIcon from "@material-ui/icons/PauseCircleFilled";
 import PlayCircleFilledIcon from "@material-ui/icons/PlayCircleFilled";
 import DeleteIcon from "@material-ui/icons/Delete";
 import MoreHorizIcon from "@material-ui/icons/MoreHoriz";
+import ViewColumnIcon from "@material-ui/icons/ViewColumn";
 import DeleteQueueConfirmationDialog from "./DeleteQueueConfirmationDialog";
 import { Queue } from "../api";
 import { queueDetailsPath } from "../paths";
+import { AppState } from "../store";
+import { dashboardHiddenColumnsChange } from "../actions/settingsActions";
 import { SortDirection, SortableTableColumn } from "../types/table";
+import { TaskState } from "../types/taskState";
 import prettyBytes from "pretty-bytes";
 import { percentage } from "../utils";
 
@@ -32,23 +41,50 @@ const useStyles = makeStyles((theme) => ({
     left: 0,
     background: theme.palette.background.paper,
   },
+  fixedRightCell: {
+    position: "sticky",
+    zIndex: 1,
+    right: 0,
+    background: theme.palette.background.paper,
+  },
+  columnSelectorBar: {
+    display: "flex",
+    justifyContent: "flex-end",
+  },
 }));
 
 interface QueueWithMetadata extends Queue {
   requestPending: boolean; // indicates pause/resume/delete request is pending for the queue.
 }
 
-interface Props {
+function mapStateToProps(state: AppState) {
+  return {
+    hiddenColumns: state.settings.dashboardHiddenColumns,
+  };
+}
+
+const connector = connect(mapStateToProps, { dashboardHiddenColumnsChange });
+
+interface OwnProps {
   queues: QueueWithMetadata[];
   onPauseClick: (qname: string) => Promise<void>;
   onResumeClick: (qname: string) => Promise<void>;
   onDeleteClick: (qname: string) => Promise<void>;
 }
 
+type Props = OwnProps & ConnectedProps<typeof connector>;
+
 enum SortBy {
   Queue,
   State,
   Size,
+  Active,
+  Pending,
+  Aggregating,
+  Scheduled,
+  Retry,
+  Archived,
+  Completed,
   MemoryUsage,
   Latency,
   Processed,
@@ -57,6 +93,22 @@ enum SortBy {
 
   None, // no sort support
 }
+
+interface StateColumnConfig extends SortableTableColumn<SortBy> {
+  taskState: TaskState;
+  getCount: (q: Queue) => number;
+}
+
+// Per-state count columns, in the same order as the queue-details tabs.
+const stateColConfigs: StateColumnConfig[] = [
+  { label: "Active", key: "active", sortBy: SortBy.Active, align: "right", taskState: "active", getCount: (q) => q.active },
+  { label: "Pending", key: "pending", sortBy: SortBy.Pending, align: "right", taskState: "pending", getCount: (q) => q.pending },
+  { label: "Aggregating", key: "aggregating", sortBy: SortBy.Aggregating, align: "right", taskState: "aggregating", getCount: (q) => q.aggregating },
+  { label: "Scheduled", key: "scheduled", sortBy: SortBy.Scheduled, align: "right", taskState: "scheduled", getCount: (q) => q.scheduled },
+  { label: "Retry", key: "retry", sortBy: SortBy.Retry, align: "right", taskState: "retry", getCount: (q) => q.retry },
+  { label: "Archived", key: "archived", sortBy: SortBy.Archived, align: "right", taskState: "archived", getCount: (q) => q.archived },
+  { label: "Completed", key: "completed", sortBy: SortBy.Completed, align: "right", taskState: "completed", getCount: (q) => q.completed },
+];
 
 const colConfigs: SortableTableColumn<SortBy>[] = [
   { label: "Queue", key: "queue", sortBy: SortBy.Queue, align: "left" },
@@ -67,6 +119,7 @@ const colConfigs: SortableTableColumn<SortBy>[] = [
     sortBy: SortBy.Size,
     align: "right",
   },
+  ...stateColConfigs,
   {
     label: "Memory usage",
     key: "memory_usage",
@@ -95,6 +148,11 @@ const colConfigs: SortableTableColumn<SortBy>[] = [
   { label: "Actions", key: "actions", sortBy: SortBy.None, align: "center" },
 ];
 
+// Queue (identity) and Actions (controls) are always shown.
+const hideableColConfigs = colConfigs.filter(
+  (cfg) => cfg.key !== "queue" && cfg.key !== "actions"
+);
+
 // sortQueues takes a array of queues and return a sorted array.
 // It returns a new array and leave the original array untouched.
 function sortQueues(
@@ -106,13 +164,24 @@ function sortQueues(
   return copy;
 }
 
-export default function QueuesOverviewTable(props: Props) {
+function QueuesOverviewTable(props: Props) {
   const classes = useStyles();
   const [sortBy, setSortBy] = useState<SortBy>(SortBy.Queue);
   const [sortDir, setSortDir] = useState<SortDirection>(SortDirection.Asc);
   const [queueToDelete, setQueueToDelete] = useState<QueueWithMetadata | null>(
     null
   );
+  const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(
+    null
+  );
+  const hiddenColumns = new Set(props.hiddenColumns);
+  const toggleColumn = (key: string) => {
+    props.dashboardHiddenColumnsChange(
+      hiddenColumns.has(key)
+        ? props.hiddenColumns.filter((k) => k !== key)
+        : [...props.hiddenColumns, key]
+    );
+  };
   const createSortClickHandler = (sortKey: SortBy) => (e: React.MouseEvent) => {
     if (sortKey === sortBy) {
       // Toggle sort direction.
@@ -127,6 +196,13 @@ export default function QueuesOverviewTable(props: Props) {
 
   const cmpFunc = (q1: QueueWithMetadata, q2: QueueWithMetadata): number => {
     let isQ1Smaller: boolean;
+    const stateCol = stateColConfigs.find((cfg) => cfg.sortBy === sortBy);
+    if (stateCol) {
+      const c1 = stateCol.getCount(q1);
+      const c2 = stateCol.getCount(q2);
+      if (c1 === c2) return 0;
+      return (c1 < c2) === (sortDir === SortDirection.Asc) ? -1 : 1;
+    }
     switch (sortBy) {
       case SortBy.Queue:
         if (q1.queue === q2.queue) return 0;
@@ -179,6 +255,33 @@ export default function QueuesOverviewTable(props: Props) {
 
   return (
     <React.Fragment>
+      <div className={classes.columnSelectorBar}>
+        <Tooltip title="Choose columns">
+          <IconButton
+            size="small"
+            aria-label="choose visible columns"
+            onClick={(e) => setColumnMenuAnchor(e.currentTarget)}
+          >
+            <ViewColumnIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Menu
+          anchorEl={columnMenuAnchor}
+          open={Boolean(columnMenuAnchor)}
+          onClose={() => setColumnMenuAnchor(null)}
+        >
+          {hideableColConfigs.map((cfg) => (
+            <MenuItem key={cfg.key} dense onClick={() => toggleColumn(cfg.key)}>
+              <Checkbox
+                size="small"
+                checked={!hiddenColumns.has(cfg.key)}
+                disableRipple
+              />
+              <ListItemText primary={cfg.label} />
+            </MenuItem>
+          ))}
+        </Menu>
+      </div>
       <TableContainer>
         <Table className={classes.table} aria-label="queues overview table">
           <TableHead>
@@ -188,11 +291,15 @@ export default function QueuesOverviewTable(props: Props) {
                   // Filter out actions column in readonly mode.
                   return !window.READ_ONLY || cfg.key !== "actions";
                 })
-                .map((cfg, i) => (
+                .filter((cfg) => !hiddenColumns.has(cfg.key))
+                .map((cfg) => (
                   <TableCell
                     key={cfg.key}
                     align={cfg.align}
-                    className={clsx(i === 0 && classes.fixedCell)}
+                    className={clsx(
+                      cfg.key === "queue" && classes.fixedCell,
+                      cfg.key === "actions" && classes.fixedRightCell
+                    )}
                   >
                     {cfg.sortBy !== SortBy.None ? (
                       <TableSortLabel
@@ -214,6 +321,7 @@ export default function QueuesOverviewTable(props: Props) {
               <Row
                 key={q.queue}
                 queue={q}
+                hiddenColumns={hiddenColumns}
                 onPauseClick={() => props.onPauseClick(q.queue)}
                 onResumeClick={() => props.onResumeClick(q.queue)}
                 onDeleteClick={() => setQueueToDelete(q)}
@@ -246,6 +354,9 @@ const useRowStyles = makeStyles((theme) => ({
       textDecoration: "underline",
     },
   },
+  zeroCount: {
+    color: theme.palette.text.disabled,
+  },
   textGreen: {
     color: theme.palette.success.dark,
   },
@@ -266,10 +377,17 @@ const useRowStyles = makeStyles((theme) => ({
     justifyContent: "center",
     minWidth: "100px",
   },
+  fixedRightCell: {
+    position: "sticky",
+    zIndex: 1,
+    right: 0,
+    background: theme.palette.background.paper,
+  },
 }));
 
 interface RowProps {
   queue: QueueWithMetadata;
+  hiddenColumns: Set<string>;
   onPauseClick: () => void;
   onResumeClick: () => void;
   onDeleteClick: () => void;
@@ -277,8 +395,9 @@ interface RowProps {
 
 function Row(props: RowProps) {
   const classes = useRowStyles();
-  const { queue: q } = props;
+  const { queue: q, hiddenColumns } = props;
   const [showIcons, setShowIcons] = useState<boolean>(false);
+  const show = (key: string) => !hiddenColumns.has(key);
   return (
     <TableRow key={q.queue} className={classes.row}>
       <TableCell
@@ -290,22 +409,52 @@ function Row(props: RowProps) {
           {q.queue}
         </Link>
       </TableCell>
-      <TableCell>
-        {q.paused ? (
-          <span className={classes.textRed}>paused</span>
-        ) : (
-          <span className={classes.textGreen}>run</span>
-        )}
-      </TableCell>
-      <TableCell align="right">{q.size}</TableCell>
-      <TableCell align="right">{prettyBytes(q.memory_usage_bytes)}</TableCell>
-      <TableCell align="right">{q.display_latency}</TableCell>
-      <TableCell align="right">{q.processed}</TableCell>
-      <TableCell align="right">{q.failed}</TableCell>
-      <TableCell align="right">{percentage(q.failed, q.processed)}</TableCell>
+      {show("state") && (
+        <TableCell>
+          {q.paused ? (
+            <span className={classes.textRed}>paused</span>
+          ) : (
+            <span className={classes.textGreen}>run</span>
+          )}
+        </TableCell>
+      )}
+      {show("size") && (
+        <TableCell align="right">{q.size.toLocaleString()}</TableCell>
+      )}
+      {stateColConfigs
+        .filter((cfg) => show(cfg.key))
+        .map((cfg) => {
+          const count = cfg.getCount(q);
+          return (
+            <TableCell key={cfg.key} align="right">
+              <Link
+                to={queueDetailsPath(q.queue, cfg.taskState)}
+                className={clsx(classes.linkText, count === 0 && classes.zeroCount)}
+              >
+                {count.toLocaleString()}
+              </Link>
+            </TableCell>
+          );
+        })}
+      {show("memory_usage") && (
+        <TableCell align="right">{prettyBytes(q.memory_usage_bytes)}</TableCell>
+      )}
+      {show("latency") && (
+        <TableCell align="right">{q.display_latency}</TableCell>
+      )}
+      {show("processed") && (
+        <TableCell align="right">{q.processed.toLocaleString()}</TableCell>
+      )}
+      {show("failed") && (
+        <TableCell align="right">{q.failed.toLocaleString()}</TableCell>
+      )}
+      {show("error_rate") && (
+        <TableCell align="right">{percentage(q.failed, q.processed)}</TableCell>
+      )}
       {!window.READ_ONLY && (
         <TableCell
           align="center"
+          className={classes.fixedRightCell}
           onMouseEnter={() => setShowIcons(true)}
           onMouseLeave={() => setShowIcons(false)}
         >
@@ -352,3 +501,5 @@ function Row(props: RowProps) {
     </TableRow>
   );
 }
+
+export default connector(QueuesOverviewTable);

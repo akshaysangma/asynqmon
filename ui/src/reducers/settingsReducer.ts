@@ -1,5 +1,6 @@
 import {
   DAILY_STATS_KEY_CHANGE,
+  DASHBOARD_HIDDEN_COLUMNS_CHANGE,
   POLL_INTERVAL_CHANGE,
   SettingsActionTypes,
   TASK_ROWS_PER_PAGE_CHANGE,
@@ -30,6 +31,9 @@ export interface SettingsState {
 
   // Type of the chart displayed for "Processed Tasks" section in dashboard.
   dailyStatsChartType: DailyStatsKey;
+
+  // Column keys hidden in the queues overview table on the dashboard.
+  dashboardHiddenColumns: string[];
 }
 
 export const initialState: SettingsState = {
@@ -38,6 +42,7 @@ export const initialState: SettingsState = {
   isDrawerOpen: true,
   taskRowsPerPage: defaultPageSize,
   dailyStatsChartType: defaultDailyStatsKey,
+  dashboardHiddenColumns: [],
 };
 
 function settingsReducer(
@@ -73,6 +78,12 @@ function settingsReducer(
       return {
         ...state,
         dailyStatsChartType: action.value,
+      }
+
+    case DASHBOARD_HIDDEN_COLUMNS_CHANGE:
+      return {
+        ...state,
+        dashboardHiddenColumns: action.value,
       }
 
     default:
