@@ -30,7 +30,8 @@ On top of upstream asynqmon:
 
 - **Queues overview**: sortable per-state count columns (each count deep-links to that queue's state tab), a per-user column selector (persisted in the browser), Actions pinned sticky-right, thousands separators.
 - **Newest-first archived & completed tables**, via an `order=desc` parameter on their list endpoints.
-- **Cross-page task search** on every per-queue status tab except Aggregating (group-scoped, not yet supported): "Search all N" scans the whole state server-side in progressive windows (`--search-scan-window` per request, "Search deeper" continues; archived/completed scan newest-first, matching their display order) and reports honestly how much was scanned. Matches task ID, type, and formatted payload; a full task UUID short-circuits to an O(1) exact lookup and hints when the task lives under a different state.
+- **Cross-page task search** on every per-queue status tab except Aggregating (group-scoped, not yet supported): "Search all N" scans the whole state server-side in progressive windows (`--search-scan-window` per request, "Search deeper" continues; archived/completed scan newest-first, matching their display order) and reports honestly how much was scanned. Matches task ID, type, and formatted payload.
+- **Exact-ID lookup** on the ID column header (all tabs, any ID shape — including custom `asynq.TaskID` values): resolves in O(1) via the task-info endpoint, renders the task when it's in the current tab, links to the task's actual state when it isn't, and distinguishes "not found" from a failed lookup.
 - Task ID/payload filter toolbar, light theme, `--root-path` support, multi-arch Dockerfile (earlier fork commits).
 
 ## Install the binary
